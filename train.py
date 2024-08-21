@@ -39,11 +39,11 @@ if __name__ == '__main__':
 
     model = SRCNN().to(device)
     criterion = nn.MSELoss()
-    optimizer = optim.Adam([
-        {'params': model.conv1.parameters()},
-        {'params': model.conv2.parameters()},
-        {'params': model.conv3.parameters(), 'lr': args.lr * 0.1}
-    ], lr=args.lr)
+    optimizer = optim.AdamW([
+    {'params': model.conv1.parameters()},
+    {'params': model.conv2.parameters()},
+    {'params': model.conv3.parameters(), 'lr': args.lr * 0.1}
+    ], lr=args.lr, weight_decay=0.01)
 
     train_dataset = TrainDataset(args.train_file)
     train_dataloader = DataLoader(dataset=train_dataset,
