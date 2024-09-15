@@ -38,7 +38,7 @@ if __name__ == "__main__":
 
     # G-Loss params
     patch_size = 8
-    #gradloss_weight = 0.01
+    gradloss_weight = 0.01
 
     # Train params
     epochs = 150
@@ -53,24 +53,21 @@ if __name__ == "__main__":
     # adam_w -> with adam_w optimizer -- PSNR: 33.23
     # gelu -> with gelu activation -- PSNR: 32.99
     # TODO: change
-    train_name = "residuals"
+    train_name = "g_loss_mse"
 
     train_file = f"./91_Image_train/91-image_x{scale}.h5"
     eval_file = f"./Set_5_eval/Set5_x{scale}.h5"
 
     mse_criterion = nn.MSELoss()
-    #grad_criterion = GradientVariance(patch_size=patch_size).to(device)
-    #ssim_criterion = SSIM().to(device)
+    grad_criterion = GradientVariance(patch_size=patch_size).to(device)
+    ssim_criterion = SSIM().to(device)
     optimizer = torch.optim.Adam(
         [
             {"params": model.conv1.parameters()},
             {"params": model.conv2.parameters()},
             {"params": model.conv3.parameters(), "lr": lr * 0.1},
-            {"params": model.residual_conv1.parameters()},
-            {"params": model.residual_conv2.parameters()},
-            {"params": model.residual_conv3.parameters()}
         ],
-        lr=lr
+        lr=lr,
     )
 
     train_dataset = TrainDataset(train_file)
@@ -100,13 +97,13 @@ if __name__ == "__main__":
 
             preds = model(inputs)
 
-            #loss_ssim = ssim_criterion(preds, labels)
+            # loss_ssim = ssim_criterion(preds, labels)
 
-            loss = mse_criterion(preds, labels)
+            loss_mse = mse_criterion(preds, labels)
 
-            #loss_grad = gradloss_weight * grad_criterion(preds, labels)
+            loss_grad = gradloss_weight * grad_criterion(preds, labels)
 
-            #loss = loss_mse + loss_grad
+            loss = loss_mse + loss_grad
 
             optimizer.zero_grad()
             loss.backward()
@@ -125,17 +122,17 @@ if __name__ == "__main__":
 
                 preds = model(inputs)
 
-                loss = mse_criterion(preds, labels)
+                loss_mse = mse_criterion(preds, labels)
 
                 # loss_ssim = ssim_criterion(preds, labels)
 
-                #loss_grad = gradloss_weight * grad_criterion(preds, labels)
+                loss_grad = gradloss_weight * grad_criterion(preds, labels)
 
-                #loss = loss_mse + loss_grad
+                loss = loss_mse + loss_grad
 
                 eval_loss += loss.sum().item()
 
-                psnr += calc_psnr(loss).sum().item()
+                psnr += calc_psnr(loss_mse).sum().item()
 
         eval_loss /= len(eval_dataloader)
         psnr /= len(eval_dataloader)
