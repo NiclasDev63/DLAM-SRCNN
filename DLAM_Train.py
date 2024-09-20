@@ -42,9 +42,8 @@ if __name__ == "__main__":
         [
             {"params": model.conv1.parameters(), "lr": lr},
             {"params": model.conv2.parameters(), "lr": lr},
-            {"params": model.conv3.parameters(), "lr": lr_last_layer},
-        ],
-        momentum=0.9,
+            {"params": model.conv3.parameters(), "lr": lr_last_layer}
+        ]
     )
 
     train_dataset = TrainDataset(train_file)
