@@ -1,73 +1,50 @@
 import csv
-
 import torch
-import torch._dynamo
 import torch.nn as nn
 from torch.utils.data.dataloader import DataLoader
 from tqdm import tqdm
 
 from datasets import EvalDataset, TrainDataset
-from Gloss import SSIM, GradientVariance
 from models import SRCNN
 
-# Suppress missing triton errors while compiling
-torch._dynamo.config.suppress_errors = True
+def calc_psnr(mse):
+    return 10 * torch.log10(1 / mse)
 
-
-def calc_psnr(MSE):
-    return 10 * torch.log10(1 / MSE)
-
-
-def saveEpochStats(epoch, train_loss, eval_loss, psnr, scale, train_name):
+def save_epoch_stats(epoch, train_loss, eval_loss, psnr, scale, train_name):
     csv_file = open(
-        f"./DLAM_weights/{train_name}_epoch_stats_srcnn_x{scale}.csv", mode="a"
+        f"./weights/{train_name}_epoch_stats_srcnn_x{scale}.csv", mode="a"
     )
     writer = csv.writer(csv_file)
     writer.writerow([epoch + 1, train_loss, eval_loss, psnr])
     csv_file.close()
 
-
 if __name__ == "__main__":
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = SRCNN()
-    # model.load_state_dict(torch.load('./weights/srcnn_x4.pth', map_location=device))
-    # model = torch.compile(model)
-    print("Using device: ", device)
+    model = SRCNN(num_channels=1) # 1 Grayscale, 3 RGB
+    print("Using device:", device)
     model.to(device)
 
-    # G-Loss params
-    patch_size = 8
-    gradloss_weight = 0.01
-
-    # Train params
     epochs = 150
-    batch_size = 16
+    batch_size = 128
     num_workers = 8
-    lr = 1e-4
     scale = 3
 
-    # base -> from github repo (just to see if we can reproduce the results) -- PSNR: 33.18
-    # g_loss_mse -> with gradient variance loss -- PSNR: 33.10, 32.90
-    # g_loss_ssim -> with gradient variance loss and ssim -- PSNR:
-    # adam_w -> with adam_w optimizer -- PSNR: 33.23
-    # gelu -> with gelu activation -- PSNR: 32.99
-    # TODO: change
-    train_name = "g_loss_mse"
+    lr = 1e-4
+    lr_last_layer = 1e-5
 
     train_file = f"./91_Image_train/91-image_x{scale}.h5"
     eval_file = f"./Set_5_eval/Set5_x{scale}.h5"
 
-    mse_criterion = nn.MSELoss()
-    grad_criterion = GradientVariance(patch_size=patch_size).to(device)
-    ssim_criterion = SSIM().to(device)
-    optimizer = torch.optim.Adam(
+    criterion = nn.MSELoss()
+
+    optimizer = torch.optim.SGD(
         [
-            {"params": model.conv1.parameters()},
-            {"params": model.conv2.parameters()},
-            {"params": model.conv3.parameters(), "lr": lr * 0.1},
+            {"params": model.conv1.parameters(), "lr": lr},
+            {"params": model.conv2.parameters(), "lr": lr},
+            {"params": model.conv3.parameters(), "lr": lr_last_layer},
         ],
-        lr=lr,
+        momentum=0.9,
     )
 
     train_dataset = TrainDataset(train_file)
@@ -85,11 +62,10 @@ if __name__ == "__main__":
     best_psnr = float("-inf")
 
     for epoch in range(epochs):
-        train_loss = 0
-        eval_loss = 0
-        psnr = 0
         model.train()
-        for data in tqdm(train_dataloader):
+        train_loss = 0.0
+
+        for data in tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}"):
             inputs, labels = data
 
             inputs = inputs.to(device)
@@ -97,22 +73,20 @@ if __name__ == "__main__":
 
             preds = model(inputs)
 
-            # loss_ssim = ssim_criterion(preds, labels)
-
-            loss_mse = mse_criterion(preds, labels)
-
-            loss_grad = gradloss_weight * grad_criterion(preds, labels)
-
-            loss = loss_mse + loss_grad
+            loss = criterion(preds, labels)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            train_loss += loss.sum().item()
-        train_loss /= len(train_dataloader)
+            train_loss += loss.item() * inputs.size(0)
+
+        train_loss /= len(train_dataloader.dataset)
 
         model.eval()
+        eval_loss = 0.0
+        psnr_total = 0.0
+
         with torch.no_grad():
             for data in eval_dataloader:
                 inputs, labels = data
@@ -122,24 +96,18 @@ if __name__ == "__main__":
 
                 preds = model(inputs)
 
-                loss_mse = mse_criterion(preds, labels)
+                loss = criterion(preds, labels)
+                eval_loss += loss.item()
 
-                # loss_ssim = ssim_criterion(preds, labels)
-
-                loss_grad = gradloss_weight * grad_criterion(preds, labels)
-
-                loss = loss_mse + loss_grad
-
-                eval_loss += loss.sum().item()
-
-                psnr += calc_psnr(loss_mse).sum().item()
+                psnr = calc_psnr(loss.item())
+                psnr_total += psnr
 
         eval_loss /= len(eval_dataloader)
-        psnr /= len(eval_dataloader)
+        psnr_avg = psnr_total / len(eval_dataloader)
 
-        if psnr > best_psnr:
-            print(f"New Best... saving model with PSNR: {psnr}")
-            best_psnr = psnr
+        if psnr_avg > best_psnr:
+            print(f"New Best PSNR: {psnr_avg:.4f} dB - Saving model")
+            best_psnr = psnr_avg
             torch.save(
                 {
                     "epoch": epoch + 1,
@@ -147,12 +115,14 @@ if __name__ == "__main__":
                     "optimizer_state_dict": optimizer.state_dict(),
                     "train_loss": train_loss,
                     "eval_loss": eval_loss,
-                    "psnr": psnr,
+                    "psnr": psnr_avg,
                 },
-                f"./DLAM_weights/{train_name}_srcnn_x{scale}.pth",
+                f"./weights/srcnn_x{scale}.pth",
             )
 
-        saveEpochStats(epoch, train_loss, eval_loss, psnr, scale, train_name)
+        save_epoch_stats(epoch, train_loss, eval_loss, psnr_avg, scale, "srcnn")
+
         print(
-            f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss} - Eval Loss: {eval_loss} - PSNR: {psnr}"
+            f"Epoch {epoch+1}/{epochs} - "
+            f"Train Loss: {train_loss:.6f} - Eval Loss: {eval_loss:.6f} - PSNR: {psnr_avg:.2f} dB"
         )
